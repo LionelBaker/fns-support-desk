@@ -800,12 +800,13 @@ ipcMain.handle('send-ticket', async (event, ticketData) => {
             html += row('Hostname', systemInfo.hostname || '');
             html += row('Uptime', systemInfo.uptime || '');
             if (systemInfo.cpu) {
-                html += row('CPU', `${systemInfo.cpu.model || ''} (${systemInfo.cpu.cores || ''} cores)`);
-                html += row('CPU Load', systemInfo.cpu.currentLoad ? systemInfo.cpu.currentLoad.toFixed(1) + '%' : 'N/A');
-            if (systemInfo.memory) {
-                html += row('Memory', `${(systemInfo.memory.used/1024/1024/1024).toFixed(2)} GB used / ${(systemInfo.memory.total/1024/1024/1024).toFixed(2)} GB total (${systemInfo.memory.usagePercent ? systemInfo.memory.usagePercent.toFixed(1) : '?'}%)`);
-            }
-            if (systemInfo.disks && Array.isArray(systemInfo.disks) && systemInfo.disks.length > 0) {
+    html += row('CPU', `${systemInfo.cpu.model || ''} (${systemInfo.cpu.cores || ''} cores)`);
+    html += row('CPU Load', systemInfo.cpu.currentLoad ? systemInfo.cpu.currentLoad.toFixed(1) + '%' : 'N/A');
+}
+if (systemInfo.memory) {
+    html += row('Memory', `${(systemInfo.memory.used/1024/1024/1024).toFixed(2)} GB used / ${(systemInfo.memory.total/1024/1024/1024).toFixed(2)} GB total (${systemInfo.memory.usagePercent ? systemInfo.memory.usagePercent.toFixed(1) : '?'}%)`);
+}
+if (systemInfo.disks && Array.isArray(systemInfo.disks) && systemInfo.disks.length > 0) {
   console.log('Debug - Disk data:', JSON.stringify(systemInfo.disks, null, 2));
   html += `<tr><td style="background:#f4f4f4;font-weight:bold;">Disks</td><td><ul style="margin:0;padding-left:15px;">` +
     systemInfo.disks.map(d => {
