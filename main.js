@@ -33,6 +33,46 @@ let tray = null;
 let isTeamViewerHandlerInitialized = false;
 let isAppInitialized = false;
 let isAppQuitting = false;
+let startMinimized = process.argv.includes('--minimized');
+
+// Persisted window state
+function getWindowStatePath() {
+  try {
+    return path.join(app.getPath('userData'), 'window-state.json');
+  } catch {
+    return null;
+  }
+}
+function loadWindowState() {
+  try {
+    const file = getWindowStatePath();
+    if (file && fs.existsSync(file)) {
+      const raw = fs.readFileSync(file, 'utf8');
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    }
+  } catch {}
+  return {};
+}
+function saveWindowState(state) {
+  try {
+    const file = getWindowStatePath();
+    if (file) fs.writeFileSync(file, JSON.stringify(state), 'utf8');
+  } catch {}
+}
+
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
 
 // Platform-specific configurations
 const PLATFORM_CONFIG = {
@@ -72,7 +112,12 @@ function openFileOrFolder(filePath) {
     
     let command;
     if (PLATFORM_CONFIG.isWindows) {
-      command = `start "" "${filePath}"`;
+      // For TeamViewer, use specific launch parameters to avoid getting stuck
+      if (filePath.includes('TeamViewer')) {
+        command = `"${filePath}" --module 1`; // Launch in QuickSupport mode
+      } else {
+        command = `start "" "${filePath}"`;
+      }
     } else if (PLATFORM_CONFIG.isMac) {
       command = `open "${filePath}"`;
     } else {
@@ -83,7 +128,22 @@ function openFileOrFolder(filePath) {
       if (error) {
         console.error(`Error opening file: ${error}`);
         console.error(`stderr: ${stderr}`);
-        reject(error);
+        // Try fallback method for TeamViewer
+        if (filePath.includes('TeamViewer') && PLATFORM_CONFIG.isWindows) {
+          console.log('Trying fallback TeamViewer launch method...');
+          const fallbackCommand = `powershell -Command "Start-Process -FilePath '${filePath}' -ArgumentList '--module 1'"`;
+          exec(fallbackCommand, (fallbackError, fallbackStdout, fallbackStderr) => {
+            if (fallbackError) {
+              console.error(`Fallback also failed: ${fallbackError}`);
+              reject(fallbackError);
+            } else {
+              console.log(`Successfully opened with fallback: ${filePath}`);
+              resolve();
+            }
+          });
+        } else {
+          reject(error);
+        }
       } else {
         console.log(`Successfully opened: ${filePath}`);
         resolve();
@@ -186,6 +246,10 @@ async function downloadTeamViewerQuickSupport() {
       // For Windows, just open the downloaded file
       console.log('Launching TeamViewer QuickSupport...');
       await openFileOrFolder(tempPath);
+      
+      // Add a small delay to allow TeamViewer to initialize
+      console.log('Waiting for TeamViewer to initialize...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     return tempPath;
@@ -205,6 +269,73 @@ async function downloadTeamViewerQuickSupport() {
   }
 }
 
+// Consolidated TeamViewer launch handler
+function setupTeamViewerHandler() {
+  // Prevent multiple initializations
+  if (isTeamViewerHandlerInitialized) {
+    console.log('TeamViewer handler already initialized');
+    return;
+  }
+
+  console.log('Initializing TeamViewer handler...');
+  
+  // Remove all existing 'launch-teamviewer' handlers
+  ipcMain.removeHandler('launch-teamviewer');
+
+  // Add new handler
+  ipcMain.handle('launch-teamviewer', async (event) => {
+    console.log('TeamViewer launch handler called');
+
+    try {
+      // First, check if TeamViewer is already installed
+      if (isTeamViewerInstalled()) {
+        try {
+          // Try to launch existing TeamViewer installations
+          const launchPath = TEAMVIEWER_PATHS.find(path => {
+            try {
+              const exists = fs.existsSync(path);
+              console.log(`Checking if TeamViewer exists at ${path}: ${exists}`);
+              return exists;
+            } catch (e) {
+              console.error(`Error checking path ${path}:`, e);
+              return false;
+            }
+          });
+          
+          if (launchPath) {
+            console.log(`Launching existing TeamViewer from: ${launchPath}`);
+            await openFileOrFolder(launchPath);
+            return { success: true, installed: true };
+          }
+        } catch (error) {
+          console.error('Error in TeamViewer launch process:', error);
+          // Continue to download if launch fails
+        }
+      }
+
+      // If not installed or launch failed, download TeamViewer Quick Support
+      console.log('TeamViewer not found or failed to launch, initiating download');
+      try {
+        const downloadPath = await downloadTeamViewerQuickSupport();
+        return { 
+          success: true, 
+          installed: false, 
+          downloadPath: downloadPath 
+        };
+      } catch (error) {
+        console.error('TeamViewer download failed:', error);
+        throw new Error(`Failed to download TeamViewer: ${error.message}`);
+      }
+    } catch (error) {
+      console.error('TeamViewer handler error:', error);
+      throw error;
+    }
+  });
+
+  isTeamViewerHandlerInitialized = true;
+  console.log('TeamViewer handler initialized successfully');
+}
+
 /**
  * Helper function to promisify exec
  */
@@ -220,6 +351,389 @@ function execAsync(command) {
       }
     });
   });
+}
+
+// Comprehensive Office Info Helper
+async function getOfficeInfo() {
+  if (!PLATFORM_CONFIG.isWindows) return { found: false, details: 'Not Windows' };
+  const { execSync } = require('child_process');
+  const fs = require('fs');
+  let officeInfo = {
+    found: false,
+    products: [], // Multiple Office installs possible
+    details: ''
+  };
+
+  // Helper: Map ProductReleaseIds to friendly names
+  const productIdMap = {
+    'O365ProPlusRetail': 'Microsoft 365 Apps for enterprise',
+    'O365BusinessRetail': 'Microsoft 365 Apps for business',
+    'O365HomePremRetail': 'Microsoft 365 Family',
+    'O365EduCloud': 'Microsoft 365 Education',
+    'ProfessionalRetail': 'Office Professional',
+    'HomeStudentRetail': 'Office Home & Student',
+    'HomeBusinessRetail': 'Office Home & Business',
+    // Add more as needed
+  };
+
+  // Initialize WMI products array
+  let wmiProducts = [];
+  
+  try {
+    // 1. Try ClickToRun (Microsoft 365, modern Office)
+    let clickToRunFound = false;
+    try {
+      const regBase = 'HKLM\\SOFTWARE\\Microsoft\\Office\\ClickToRun\\Configuration';
+      const prodIdsReg = execSync(`reg query "${regBase}" /v ProductReleaseIds`, { encoding: 'utf8' });
+      const prodIdsMatch = prodIdsReg.match(/ProductReleaseIds\s+REG_SZ\s+(.+)/);
+      if (prodIdsMatch) {
+        clickToRunFound = true;
+        let productIds = prodIdsMatch[1];
+        let mainProductId = productIds.split(',')[0].replace(/;.*$/, '').trim();
+        let officeName = productIdMap[mainProductId] || mainProductId;
+
+        // Version/build
+        let version = '', build = '', marketingVersion = '', versionDisplay = '';
+        try {
+          const versionReg = execSync(`reg query "${regBase}" /v VersionToReport`, { encoding: 'utf8' });
+          const versionMatch = versionReg.match(/VersionToReport\s+REG_SZ\s+([\d\.]+)/);
+          if (versionMatch) {
+            version = versionMatch[1];
+            // Example: 16.0.19029.20136
+            const buildMatch = version.match(/^16\.0\.(\d+)\.(\d+)$/);
+            if (buildMatch) {
+              build = `${buildMatch[1]}.${buildMatch[2]}`;
+              // Map build to YYMM (major version)
+              // Microsoft uses a YYMM versioning (e.g. 2507)
+              // See: https://learn.microsoft.com/en-us/officeupdates/update-history-microsoft365apps-by-date
+              // We'll use the build's first 2 digits as YY, next 2 as MM (approx)
+              const buildNum = parseInt(buildMatch[1], 10);
+              // Heuristic: Microsoft increments build by ~100 for each month
+              // We'll try to extract the YYMM from the build if possible
+              // But fallback to just showing the build
+              // (Best: use UpdateChannel info for exact version)
+              marketingVersion = '';
+              try {
+                const clientVersionReg = execSync(`reg query "${regBase}" /v ClientVersionToReport`, { encoding: 'utf8' });
+                const clientVersionMatch = clientVersionReg.match(/ClientVersionToReport\s+REG_SZ\s+([\d\.]+)/);
+                if (clientVersionMatch) {
+                  const clientVer = clientVersionMatch[1];
+                  // Format: 2507
+                  marketingVersion = clientVer;
+                }
+              } catch {}
+              versionDisplay = marketingVersion
+                ? `Version ${marketingVersion} (Build ${build} Click-to-Run)`
+                : `Build ${build} (Click-to-Run)`;
+            }
+          }
+        } catch {}
+
+        // Channel
+        let channel = '';
+        try {
+          const channelReg = execSync(`reg query "${regBase}" /v UpdateChannel`, { encoding: 'utf8' });
+          const channelMatch = channelReg.match(/UpdateChannel\s+REG_SZ\s+(.+)/);
+          if (channelMatch) {
+            // Map known channel URLs to friendly names
+            const url = channelMatch[1];
+            if (url.match(/Current/)) channel = 'Current Channel';
+            else if (url.match(/MonthlyEnterprise/)) channel = 'Monthly Enterprise Channel';
+            else if (url.match(/Broad/)) channel = 'Semi-Annual Enterprise Channel';
+            else channel = url;
+          }
+        } catch {}
+
+        // Subscription email/account
+        let registeredTo = '';
+        try {
+          const clickToRunUser = execSync(`reg query "HKCU\\Software\\Microsoft\\Office\\16.0\\Common\\CloudUser" /v AccountUpn`, { encoding: 'utf8' });
+          const upnMatch = clickToRunUser.match(/AccountUpn\s+REG_SZ\s+(.+)/);
+          if (upnMatch) registeredTo = upnMatch[1].trim();
+        } catch {}
+        // Try XML if not found
+        if (!registeredTo) {
+          const xmlDir = 'C:\\ProgramData\\Microsoft\\Office\\Account';
+          try {
+            if (fs.existsSync(xmlDir)) {
+              const files = fs.readdirSync(xmlDir).filter(f => f.endsWith('.xml'));
+              for (const file of files) {
+                const xml = fs.readFileSync(`${xmlDir}\\${file}`, 'utf8');
+                const upnXml = xml.match(/<UserPrincipalName>([^<]+)<\/UserPrincipalName>/);
+                if (upnXml) {
+                  registeredTo = upnXml[1];
+                  break;
+                }
+              }
+            }
+          } catch {}
+        }
+
+        // Compose output
+        officeInfo.products.push({
+          name: officeName,
+          version: versionDisplay,
+          build: build,
+          type: 'Office 365/ClickToRun',
+          arch: '', // Optional: can add arch logic
+          license: mainProductId,
+          registeredTo: registeredTo ? `Subscription Product for ${registeredTo}` : '',
+          channel: channel,
+          details: ''
+        });
+        officeInfo.found = true;
+      }
+    } catch {}
+
+    // 2. Fallback: Perpetual licenses (legacy Office)
+    if (!officeInfo.found) {
+      const regVersions = ['16.0','15.0','14.0','12.0'];
+      for (const version of regVersions) {
+        // Registration key
+        const regKey = `HKLM\\SOFTWARE\\Microsoft\\Office\\${version}\\Registration`;
+        try {
+          const output = execSync(`reg query ${regKey} /s`, { encoding: 'utf8' });
+          // Split by subkey
+          const blocks = output.split(/\r?\n\r?\n/).filter(Boolean);
+          for (const block of blocks) {
+            let name = '', regOwner = '', prodId = '';
+            const nameMatch = block.match(/ProductName\s+REG_SZ\s+(.+)/);
+            if (nameMatch) name = nameMatch[1].trim();
+            const ownerMatch = block.match(/RegisteredOwner\s+REG_SZ\s+(.+)/);
+            if (ownerMatch) regOwner = ownerMatch[1].trim();
+            const idMatch = block.match(/ProductID\s+REG_SZ\s+(.+)/);
+            if (idMatch) prodId = idMatch[1].trim();
+            if (name) {
+              officeInfo.products.push({
+                name,
+                version,
+                type: 'Perpetual',
+                registeredTo: regOwner,
+                license: prodId,
+                details: ''
+              });
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // Clean up products array for reporting
+    if (officeInfo.products.length > 0) {
+      officeInfo.found = true;
+    } else {
+      officeInfo.details = 'Not detected';
+    }
+
+    // 3. Office 365/ClickToRun: Registry and XML
+    try {
+      const clickToRun = execSync(`reg query "HKLM\\SOFTWARE\\Microsoft\\Office\\ClickToRun\\Configuration" /v ProductReleaseIds`, { encoding: 'utf8' });
+      if (clickToRun && clickToRun.includes('ProductReleaseIds')) {
+        let debugDetails = '';
+        let marketingVersion = 'Unknown';
+        let officeArch = 'Unknown';
+        let officeName = 'Unknown';
+
+        // Get version info
+        try {
+          const versionReg = execSync(`reg query "HKLM\\SOFTWARE\\Microsoft\\Office\\ClickToRun\\Configuration" /v VersionToReport`, { encoding: 'utf8' });
+          const versionMatch = versionReg.match(/VersionToReport\s+REG_SZ\s+([\d\.]+)/);
+          if (versionMatch) {
+            version = versionMatch[1];
+            // Map build number to marketing version
+            const buildMatch = version.match(/^16\.0\.(\d+)\./);
+            if (buildMatch) {
+              const build = parseInt(buildMatch[1], 10);
+              if (build >= 17000) marketingVersion = '2024';
+              else if (build >= 14000) marketingVersion = '2021';
+              else if (build >= 10300) marketingVersion = '2019';
+              else if (build >= 4266) marketingVersion = '2016';
+              else marketingVersion = '16.x (Unknown)';
+            }
+          }
+        } catch (e) { 
+          debugDetails += 'No VersionToReport; '; 
+        }
+
+        // Get product IDs
+        try {
+          const prodIdsReg = execSync(`reg query "HKLM\\SOFTWARE\\Microsoft\\Office\\ClickToRun\\Configuration" /v ProductReleaseIds`, { encoding: 'utf8' });
+          const prodIdsMatch = prodIdsReg.match(/ProductReleaseIds\s+REG_SZ\s+(.+)/);
+          if (prodIdsMatch) {
+            productIds = prodIdsMatch[1];
+            officeName = productIds.split(',')[0].replace(/;.*$/, '');
+          }
+        } catch (e) { 
+          debugDetails += 'No ProductReleaseIds; '; 
+        }
+
+        // Get registered user info
+        let registeredTo = '';
+        try {
+          const clickToRunUser = execSync(`reg query "HKCU\\Software\\Microsoft\\Office\\16.0\\Common\\CloudUser" /v AccountUpn`, { encoding: 'utf8' });
+          const upnMatch = clickToRunUser.match(/AccountUpn\s+REG_SZ\s+(.+)/);
+          if (upnMatch) registeredTo = upnMatch[1].trim();
+        } catch (e) { 
+          debugDetails += 'No AccountUpn; '; 
+        }
+
+        // Try to get from XML if registry lookup failed
+        if (!registeredTo) {
+          const xmlDir = 'C:\\ProgramData\\Microsoft\\Office\\Account';
+          try {
+            if (fs.existsSync(xmlDir)) {
+              const files = fs.readdirSync(xmlDir).filter(f => f.endsWith('.xml'));
+              for (const file of files) {
+                const xml = fs.readFileSync(path.join(xmlDir, file), 'utf8');
+                const emailMatch = xml.match(/<UserEmail>([^<]+)<\/UserEmail>/i);
+                if (emailMatch) {
+                  registeredTo = emailMatch[1];
+                  break;
+                }
+              }
+            } else { 
+              debugDetails += 'No Account XML dir; '; 
+            }
+          } catch (e) { 
+            debugDetails += 'Account XML read error; '; 
+          }
+        }
+
+        // Detect architecture
+        try {
+          const winword64 = 'C:\\Program Files\\Microsoft Office';
+          const winword32 = 'C:\\Program Files (x86)\\Microsoft Office';
+          if (fs.existsSync(winword64)) {
+            const files = fs.readdirSync(winword64, { withFileTypes: true });
+            if (files.some(f => f.name.toLowerCase() === 'root' || f.name.toLowerCase() === 'office16')) {
+              officeArch = '64-bit';
+            }
+          }
+          if (fs.existsSync(winword32)) {
+            const files = fs.readdirSync(winword32, { withFileTypes: true });
+            if (files.some(f => f.name.toLowerCase() === 'root' || f.name.toLowerCase() === 'office16')) {
+              officeArch = '32-bit';
+            }
+          }
+        } catch (e) { 
+          debugDetails += 'Arch detect error; '; 
+        }
+
+        // Add product info
+        officeInfo.products.push({
+          name: officeName,
+          version: marketingVersion,
+          build: version,
+          type: 'Office 365/ClickToRun',
+          arch: officeArch,
+          registeredTo: registeredTo || '',
+          license: productIds,
+          details: debugDetails || undefined
+        });
+      }
+    } catch (err) {
+      console.error('Error in ClickToRun detection:', err);
+    }
+
+    // 4. ospp.vbs script for license/account info
+    // Try for Office16
+    try {
+      const osppPath = '"C:\\Program Files\\Microsoft Office\\Office16\\OSPP.VBS"';
+      if (fs.existsSync('C:\\Program Files\\Microsoft Office\\Office16\\OSPP.VBS')) {
+        const cscriptOut = execSync(`cscript //Nologo ${osppPath} /dstatus`, { encoding: 'utf8' });
+        // Parse output for license/account info
+        const blocks = cscriptOut.split(/\r?\n\r?\n/).filter(Boolean);
+        for (const block of blocks) {
+          let name = '', last5 = '', user = '', type = '', debugDetails = '';
+          const nameMatch = block.match(/LICENSE NAME:\s+(.+)/i);
+          if (nameMatch) name = nameMatch[1].trim();
+          const last5Match = block.match(/Last 5 characters of installed product key: (\w+)/i);
+          if (last5Match) last5 = last5Match[1];
+          const userMatch = block.match(/Registered user:\s+(.+)/i);
+          if (userMatch) user = userMatch[1].trim();
+          // If Office 365 subscription
+          if (/subscription/i.test(name)) type = 'Office 365/Subscription';
+          if (name) {
+            officeInfo.products.push({
+              name,
+              version: '',
+              type: type || 'Perpetual',
+              registeredTo: user || '',
+              license: last5,
+              details: debugDetails || undefined
+            });
+          }
+        }
+      }
+    } catch {}
+
+    // Aggregate all results
+    const allProducts = [...wmiProducts, ...officeInfo.products];
+    officeInfo.products = allProducts.filter((p, idx, arr) => {
+      // Deduplicate by name+version+registeredTo
+      return arr.findIndex(x => x.name === p.name && x.version === p.version && x.registeredTo === p.registeredTo) === idx;
+    });
+    officeInfo.found = officeInfo.products.length > 0;
+    if (!officeInfo.found) officeInfo.details = 'Office not detected.';
+  } catch (err) {
+    officeInfo.details = `Error: ${err.message}`;
+  }
+  return officeInfo;
+}
+// Enhanced Antivirus Info Helper
+async function getAntivirusInfo() {
+  if (!PLATFORM_CONFIG.isWindows) return { found: false, details: 'Not Windows' };
+  const { execSync } = require('child_process');
+  let avProducts = [];
+  try {
+    // Use PowerShell to get detailed antivirus info
+    const psCmd = `Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct | Select-Object displayName,productState,pathToSignedProductExe,timestamp | ConvertTo-Json`;
+    const output = execSync(`powershell -Command "${psCmd}"`, { encoding: 'utf8' });
+    let parsed = [];
+    try {
+      parsed = JSON.parse(output);
+    } catch {
+      parsed = [];
+    }
+    if (!Array.isArray(parsed)) parsed = [parsed];
+    avProducts = parsed.map(p => {
+      // Improved productState decode for Defender
+      let status = 'Unknown';
+      if (typeof p.productState === 'number' || (typeof p.productState === 'string' && p.productState.match(/^[0-9]+$/))) {
+        const state = parseInt(p.productState);
+        // See https://learn.microsoft.com/en-us/windows/win32/wmic/wmi-antivirusproduct-productstate
+        // Bitmask: 0x10 = enabled, 0x1000 = up-to-date, 0x100 = scanning, 0x1 = snoozed
+        const enabled = (state & 0x10) > 0;
+        const upToDate = (state & 0x1000) > 0;
+        const scanning = (state & 0x100) > 0;
+        const snoozed = (state & 0x1) > 0;
+        if (enabled && !snoozed) status = 'Enabled';
+        else if (snoozed) status = 'Snoozed';
+        else status = 'Disabled';
+        status += upToDate ? ', UpToDate' : ', Outdated';
+        if (scanning) status += ', Scanning';
+      }
+      return {
+        name: p.displayName || '',
+        status,
+        exe: p.pathToSignedProductExe || '',
+        lastUpdate: p.timestamp || '',
+      };
+    });
+    // Fallback: if only Defender is present, and it's not reported as enabled, check Windows Security UI
+    if (avProducts.length === 1 && avProducts[0].name.match(/Defender|Windows Defender|Microsoft Defender/i)) {
+      try {
+        // Use PowerShell to check Defender real-time protection
+        const defStatus = execSync('powershell -Command "(Get-MpComputerStatus).RealTimeProtectionEnabled"', { encoding: 'utf8' });
+        if (defStatus.trim().toLowerCase() === 'true') {
+          avProducts[0].status = 'Enabled, UpToDate';
+        }
+      } catch {}
+    }
+    return { found: avProducts.length > 0, products: avProducts };
+  } catch (err) {
+    return { found: false, details: `Error: ${err.message}` };
+  }
 }
 
 // Comprehensive System Information
@@ -313,6 +827,14 @@ async function analyzeSystemHealth() {
 
 // Security Scanning (Basic Implementation)
 async function performSecurityScan() {
+  if (!PLATFORM_CONFIG.isWindows) {
+    return {
+      firewall: { enabled: false, profile: 'Not Windows' },
+      antivirus: { installed: false, products: [], details: 'Not Windows' },
+      risks: []
+    };
+  }
+
   try {
     const firewallStatus = await new Promise((resolve) => {
       exec('netsh advfirewall show currentprofile', (error, stdout) => {
@@ -343,7 +865,49 @@ async function performSecurityScan() {
   }
 }
 
-// Enhanced system information retrieval
+// Lightweight system information for performance metrics (fast)
+ipcMain.handle('get-performance-info', async () => {
+  try {
+    const si = require('systeminformation');
+
+    // Get only essential performance data (no heavy operations)
+    const [cpuLoad, memInfo, diskInfo] = await Promise.all([
+      si.currentLoad(),
+      si.mem(),
+      si.fsSize()
+    ]);
+
+    return {
+      cpu: {
+        currentLoad: cpuLoad.currentLoad || 0
+      },
+      memory: {
+        total: memInfo.total,
+        used: memInfo.used,
+        free: memInfo.free,
+        usagePercent: ((memInfo.used / memInfo.total) * 100)
+      },
+      disks: diskInfo.map(disk => ({
+        mount: disk.mount,
+        type: disk.type,
+        fs: disk.fs,
+        total: disk.size,
+        used: disk.used,
+        free: disk.available,
+        usagePercent: disk.use || 0
+      }))
+    };
+  } catch (error) {
+    console.error('Performance info error:', error);
+    return {
+      cpu: { currentLoad: 0 },
+      memory: { total: 0, used: 0, free: 0, usagePercent: 0 },
+      disks: []
+    };
+  }
+});
+
+// Enhanced system information retrieval (comprehensive - for tickets only)
 ipcMain.handle('get-system-info', async () => {
   try {
     const { execSync } = require('child_process');
@@ -372,6 +936,12 @@ ipcMain.handle('get-system-info', async () => {
       si.system()
     ]);
 
+    // Get Office and Antivirus Info
+    const [officeInfo, antivirusInfo] = await Promise.all([
+      getOfficeInfo(),
+      getAntivirusInfo()
+    ]);
+
     // Format system information
     return {
       // System Details
@@ -385,6 +955,33 @@ ipcMain.handle('get-system-info', async () => {
       // OS Details
       platform: `${osInfo.distro} ${osInfo.release} (${osInfo.arch})`,
       hostname: os.hostname(),
+      username: process.env['USERNAME'] || process.env['USER'] || 'Unknown',
+      domainType: (() => {
+        try {
+          if (process.platform === 'win32') {
+            const { execSync } = require('child_process');
+            let output = execSync('wmic computersystem get domainrole, domain', { encoding: 'utf8' });
+            const lines = output.split('\n').map(l => l.trim()).filter(Boolean);
+            if (lines.length > 1) {
+              const [header, values] = lines;
+              // Use regex to capture domain and role at end of line
+              const match = values.match(/^(.+)\s+(\d+)$/);
+              if (match) {
+                const domain = match[1].trim();
+                const role = match[2].trim();
+                if (["0","1","2"].includes(role)) return { type: 'Workgroup', name: domain };
+                if (["3","4"].includes(role)) return { type: 'Domain', name: domain };
+                return { type: 'Unknown', name: domain };
+              }
+            }
+          }
+        } catch (e) {}
+        return { type: 'Unknown', name: '' };
+      })(),
+
+      // Office and Antivirus Details
+      office: officeInfo,
+      antivirus: antivirusInfo,
       
       // Uptime
       uptime: `${Math.floor(systemUptime.uptime / 3600)} hours, ${Math.floor((systemUptime.uptime % 3600) / 60)} minutes`,
@@ -610,7 +1207,14 @@ ipcMain.handle('get-system-info', async () => {
             
             // Get connection type
             let connectionType = iface.type || 'Unknown';
-            if (detailedInfo.InterfaceDescription) {
+            // Detect Bluetooth PAN adapters
+            if ((iface.ifaceName && iface.ifaceName.toLowerCase().includes('bluetooth')) ||
+                (detailedInfo.InterfaceDescription && detailedInfo.InterfaceDescription.toLowerCase().includes('bluetooth')) ||
+                (iface.name && iface.name.toLowerCase().includes('bluetooth')) ||
+                (iface.description && iface.description.toLowerCase().includes('bluetooth'))
+            ) {
+              connectionType = 'Bluetooth';
+            } else if (detailedInfo.InterfaceDescription) {
               if (detailedInfo.InterfaceDescription.includes('Wireless')) connectionType = 'Wireless';
               else if (detailedInfo.InterfaceDescription.includes('Ethernet')) connectionType = 'Ethernet';
               else if (detailedInfo.InterfaceDescription.includes('Virtual')) connectionType = 'Virtual';
@@ -765,17 +1369,165 @@ ipcMain.handle('get-system-info', async () => {
 
 // IPC handler to get the app version
 ipcMain.handle('get-app-version', () => {
-  const version = app.getVersion();
-  log.info(`Sending app version to renderer: ${version}`);
-  return version;
+  const v = app.getVersion();
+  log.info(`Sending app version to renderer: ${v}`);
+  return v;
+});
+
+// Read-only config for DBS Remote Assist server endpoint (set at deploy/build time)
+ipcMain.handle('get-remote-assist-config', async () => {
+  const server = (process.env.DBS_REMOTE_ASSIST_SERVER || '').trim();
+  return {
+    server
+  };
+});
+
+ipcMain.handle('launch-remote-assist', async () => {
+  try {
+    if (!PLATFORM_CONFIG.isWindows) {
+      return { success: false, error: 'DBS Remote Assist download/launch is currently supported on Windows only.' };
+    }
+
+    const downloadUrl = (process.env.DBS_REMOTE_ASSIST_DOWNLOAD_URL || '').trim();
+    if (!downloadUrl) {
+      return { success: false, error: 'DBS Remote Assist download URL is not configured.' };
+    }
+
+    const downloadsDir = path.join(app.getPath('userData'), 'dbs-remote-assist');
+    try {
+      fs.mkdirSync(downloadsDir, { recursive: true });
+    } catch (e) {}
+
+    const fileName = 'DBS-Remote-Assist.exe';
+    const targetPath = path.join(downloadsDir, fileName);
+
+    if (!fs.existsSync(targetPath)) {
+      if (!mainWindow) {
+        return { success: false, error: 'Main window not available for download.' };
+      }
+
+      await download(mainWindow, downloadUrl, {
+        directory: downloadsDir,
+        filename: fileName,
+        overwrite: true,
+        showBadge: false,
+        onProgress: (progress) => {
+          try {
+            if (mainWindow && mainWindow.webContents) {
+              mainWindow.webContents.send('remote-assist-download-progress', {
+                percent: typeof progress.percent === 'number' ? Math.round(progress.percent * 100) : 0,
+                transferredBytes: progress.transferredBytes,
+                totalBytes: progress.totalBytes
+              });
+            }
+          } catch (e) {}
+        }
+      });
+    }
+
+    if (!fs.existsSync(targetPath)) {
+      return { success: false, error: 'Download did not produce an executable.' };
+    }
+
+    const result = await shell.openPath(targetPath);
+    if (result) {
+      return { success: false, error: `Failed to launch DBS Remote Assist: ${result}` };
+    }
+
+    return { success: true, path: targetPath };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// macOS / non-Windows toolbox actions (safe diagnostics + shortcuts)
+ipcMain.handle('mac-toolbox-action', async (event, action) => {
+  try {
+    if (PLATFORM_CONFIG.isWindows) {
+      return { success: false, error: 'Unsupported on Windows.' };
+    }
+
+    if (!action || typeof action !== 'string') {
+      return { success: false, error: 'Invalid action.' };
+    }
+
+    const run = (cmd) => new Promise((resolve) => {
+      exec(cmd, { timeout: 15000 }, (error, stdout, stderr) => {
+        if (error) {
+          resolve({ ok: false, error: (stderr || error.message || '').toString().trim() });
+          return;
+        }
+        resolve({ ok: true, output: (stdout || '').toString().trim() });
+      });
+    });
+
+    if (PLATFORM_CONFIG.isMac) {
+      switch (action) {
+        case 'disk-cleanup': {
+          await run('open "x-apple.systempreferences:com.apple.preferences.storage"');
+          return { success: true, message: 'Opened Storage settings.' };
+        }
+        case 'uninstall-manager': {
+          await run('open "/Applications"');
+          return { success: true, message: 'Opened Applications folder. Drag apps to Trash to uninstall.' };
+        }
+        case 'startup-manager': {
+          await run('open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"');
+          return { success: true, message: 'Opened Login Items settings.' };
+        }
+        case 'memory-optimizer': {
+          await run('open -a "Activity Monitor"');
+          return { success: true, message: 'Opened Activity Monitor.' };
+        }
+        case 'check-disk': {
+          await run('open -a "Disk Utility"');
+          return { success: true, message: 'Opened Disk Utility. Use First Aid to verify/repair disks.' };
+        }
+        case 'software-update': {
+          await run('open "x-apple.systempreferences:com.apple.preferences.softwareupdate"');
+          return { success: true, message: 'Opened Software Update settings.' };
+        }
+        case 'registry-repair': {
+          const out = await run('df -h /');
+          return { success: out.ok, message: out.ok ? `Disk usage:\n${out.output}` : undefined, error: out.ok ? undefined : (out.error || 'Failed to retrieve disk usage.') };
+        }
+        case 'registry-defrag': {
+          const out = await run('uptime');
+          return { success: out.ok, message: out.ok ? `System uptime:\n${out.output}` : undefined, error: out.ok ? undefined : (out.error || 'Failed to retrieve uptime.') };
+        }
+        default:
+          return { success: false, error: 'Unknown action.' };
+      }
+    }
+
+    // Linux (best-effort minimal actions)
+    switch (action) {
+      case 'disk-cleanup':
+      case 'uninstall-manager':
+      case 'startup-manager':
+      case 'memory-optimizer':
+      case 'check-disk':
+      case 'software-update':
+        return { success: false, error: 'Not implemented for Linux.' };
+      default:
+        return { success: false, error: 'Unknown action.' };
+    }
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
 });
 
 // Ticket Submission Handler
 ipcMain.handle('send-ticket', async (event, ticketData) => {
     console.log(`[send-ticket handler] Invoked at ${new Date().toISOString()}`);
     try {
+        const remoteSupportRequested = !!(ticketData && ticketData.remoteSupport && ticketData.remoteSupport.requested);
+        const teamViewerId = (ticketData && ticketData.remoteSupport && ticketData.remoteSupport.teamViewerId) ? String(ticketData.remoteSupport.teamViewerId).trim() : '';
+        const teamViewerPassword = (ticketData && ticketData.remoteSupport && ticketData.remoteSupport.teamViewerPassword) ? String(ticketData.remoteSupport.teamViewerPassword).trim() : '';
+        const teamViewerLaunched = (ticketData && ticketData.remoteSupport && ticketData.remoteSupport.teamViewerLaunched) ? ticketData.remoteSupport.teamViewerLaunched : false;
+
         // Prepare email content (plain text)
-        const emailContent = `Support Ticket Details:\n\nSubject: ${ticketData.subject || 'No Subject'}\nFull Name: ${ticketData.fullName}\nEmail: ${ticketData.email}\nPhone: ${ticketData.phone}\n\nDescription:\n${ticketData.description}\n\nSystem Information:\n${JSON.stringify(ticketData.systemInfo, null, 2)}\n`;
+        const emailContent = `Support Ticket Details:\n\nSubject: ${ticketData.subject || 'No Subject'}\nFull Name: ${ticketData.fullName}\nEmail: ${ticketData.email}\nPhone: ${ticketData.phone}\nRemote Support Requested: ${remoteSupportRequested ? 'Yes' : 'No'}\n${remoteSupportRequested ? `\nRemote Support Instructions:\n- Technician should contact the customer and ask them to open DBS Support Desk\n- Customer should click \"Request Remote Support\" when instructed\n- Advise customer not to work on confidential information during the session\n` : ''}\nDescription:\n${ticketData.description}\n\nSystem Information:\n${JSON.stringify(ticketData.systemInfo, null, 2)}\n`;
 
         // Prepare email content (HTML)
         function systemInfoTable(systemInfo) {
@@ -791,50 +1543,91 @@ ipcMain.handle('send-ticket', async (event, ticketData) => {
                 html += row('System Model', systemInfo.system.model || 'N/A');
                 html += row('System Serial', systemInfo.system.serial || 'N/A');
             }
-            
-            // Add a separator
-            html += '<tr><td colspan="2" style="background:#e0e0e0;height:1px;padding:0;"></td></tr>';
-            
-            // Existing system info rows
-            html += row('Platform', systemInfo.platform || '');
-            html += row('Hostname', systemInfo.hostname || '');
-            html += row('Uptime', systemInfo.uptime || '');
+            if (systemInfo.platform) {
+                html += row('Platform', systemInfo.platform);
+            }
+            if (systemInfo.office && systemInfo.office.products && systemInfo.office.products.length > 0) {
+                const officeStr = '<ul>' + systemInfo.office.products.map(o => {
+                    let parts = [];
+                    if (o.name) parts.push(o.name);
+                    if (o.version && o.version !== 'Unknown') parts.push(`Version: ${o.version}`);
+                    if (o.build && o.build !== o.version && o.build !== 'Unknown') parts.push(`Build: ${o.build}`);
+                    if (o.type && o.type !== 'Unknown') parts.push(o.type);
+                    if (o.arch && o.arch !== 'Unknown') parts.push(o.arch);
+                    if (o.license && o.license !== 'Unknown') parts.push(`License: ${o.license}`);
+                    if (o.registeredTo && o.registeredTo !== 'Unknown') parts.push(`Registered To: ${o.registeredTo}`);
+                    if (o.channel && o.channel.startsWith('http')) {
+                        // Try to extract channel name from URL if possible
+                        const channelMatch = o.channel.match(/\/([\w\-]+)$/);
+                        if (channelMatch) parts.push(`Channel: ${channelMatch[1]}`);
+                    } else if (o.channel && o.channel !== 'Unknown') {
+                        parts.push(`Channel: ${o.channel}`);
+                    }
+                    if (o.details && o.details !== 'Unknown') parts.push(o.details);
+                    return `<li>${parts.join(', ')}</li>`;
+                }).join('') + '</ul>';
+                html += row('Office', officeStr);
+            }
+            if (systemInfo.antivirus && systemInfo.antivirus.products && systemInfo.antivirus.products.length > 0) {
+                const avStr = '<ul>' + systemInfo.antivirus.products.map(av => {
+                    let s = `${av.name} (${av.status})`;
+                    if (av.lastUpdate) s += `, Last Update: ${av.lastUpdate}`;
+                    return `<li>${s}</li>`;
+                }).join('') + '</ul>';
+                html += row('Antivirus', avStr);
+            } else if (systemInfo.antivirus) {
+                html += row('Antivirus', `<span style='color:#888'>${systemInfo.antivirus.details || 'Not detected'}</span>`);
+            }
+            if (systemInfo.hostname) {
+                html += row('Hostname', systemInfo.hostname || '');
+            }
+            if (systemInfo.username) {
+                html += row('Windows User', systemInfo.username);
+            }
+            if (systemInfo.domainType && systemInfo.domainType.type && systemInfo.domainType.type !== 'Unknown') {
+                let domStr = systemInfo.domainType.type;
+                if (systemInfo.domainType.name) domStr += `: ${systemInfo.domainType.name}`;
+                html += row('Domain/Workgroup', domStr);
+            }
+            if (systemInfo.uptime) {
+                html += row('Uptime', systemInfo.uptime || '');
+            }
             if (systemInfo.cpu) {
-    html += row('CPU', `${systemInfo.cpu.model || ''} (${systemInfo.cpu.cores || ''} cores)`);
-    html += row('CPU Load', systemInfo.cpu.currentLoad ? systemInfo.cpu.currentLoad.toFixed(1) + '%' : 'N/A');
-}
-if (systemInfo.memory) {
-    html += row('Memory', `${(systemInfo.memory.used/1024/1024/1024).toFixed(2)} GB used / ${(systemInfo.memory.total/1024/1024/1024).toFixed(2)} GB total (${systemInfo.memory.usagePercent ? systemInfo.memory.usagePercent.toFixed(1) : '?'}%)`);
-}
-if (systemInfo.disks && Array.isArray(systemInfo.disks) && systemInfo.disks.length > 0) {
-  console.log('Debug - Disk data:', JSON.stringify(systemInfo.disks, null, 2));
-  html += `<tr><td style="background:#f4f4f4;font-weight:bold;">Disks</td><td><ul style="margin:0;padding-left:15px;">` +
-    systemInfo.disks.map(d => {
-      try {
-        // Format sizes
-        const totalGB = (d.total / (1024 * 1024 * 1024)).toFixed(2);
-        const usedGB = (d.used / (1024 * 1024 * 1024)).toFixed(2);
-        const usagePercent = d.usagePercent ? d.usagePercent.toFixed(1) : '0.0';
-        
-        // Build disk info string
-        const parts = [
-          `<strong>${d.mount}</strong>`,
-          d.model !== 'Unknown Model' ? d.model : '',
-          d.type ? `(${d.type})` : '',
-          `[${d.fs}]`,
-          `- ${usedGB}GB used of ${totalGB}GB (${usagePercent}%)`,
-          d.vendor !== 'Unknown' ? `- Vendor: ${d.vendor}` : '',
-          d.serial !== 'Unknown' ? `- S/N: ${d.serial}` : ''
-        ].filter(Boolean);
-        
-        return `<li>${parts.join(' ')}</li>`;
-      } catch (error) {
-        console.error('Error formatting disk info:', error, d);
-        return `<li>Error displaying disk information</li>`;
-      }
-    }).join('') +
-    `</ul></td></tr>`;
-}
+                html += row('CPU', `${systemInfo.cpu.model || ''} (${systemInfo.cpu.cores || ''} cores)`);
+                html += row('CPU Load', systemInfo.cpu.currentLoad ? systemInfo.cpu.currentLoad.toFixed(1) + '%' : 'N/A');
+            }
+            if (systemInfo.memory) {
+                html += row('Memory', `${(systemInfo.memory.used/1024/1024/1024).toFixed(2)} GB used / ${(systemInfo.memory.total/1024/1024/1024).toFixed(2)} GB total (${systemInfo.memory.usagePercent ? systemInfo.memory.usagePercent.toFixed(1) : '?'}%)`);
+            }
+            if (systemInfo.disks && Array.isArray(systemInfo.disks) && systemInfo.disks.length > 0) {
+                html += `<tr><td style="background:#f4f4f4;font-weight:bold;">Disks</td><td><ul style="margin:0;padding-left:15px;">` +
+                    systemInfo.disks.map(d => {
+                        try {
+                            // Format sizes
+                            const totalGB = (d.total / (1024 * 1024 * 1024)).toFixed(2);
+                            const usedGB = (d.used / (1024 * 1024 * 1024)).toFixed(2);
+                            const usagePercent = d.usagePercent ? d.usagePercent.toFixed(1) : '0.0';
+                            
+                            // Build disk info string
+                            const parts = [
+                                `<strong>${d.mount}</strong>`,
+                                d.model !== 'Unknown Model' ? d.model : '',
+                                d.type ? `(${d.type})` : '',
+                                `[${d.fs}]`,
+                                `- ${usedGB}GB used of ${totalGB}GB (${usagePercent}%)`,
+                                d.vendor !== 'Unknown' ? `- Vendor: ${d.vendor}` : '',
+                                d.serial !== 'Unknown' ? `- S/N: ${d.serial}` : ''
+                            ].filter(Boolean);
+                            
+                            return `<li>${parts.join(' ')}</li>`;
+                        } catch (error) {
+                            console.error('Error formatting disk info:', error, d);
+                            return `<li>Error displaying disk information</li>`;
+                        }
+                    }).join('') +
+                    `</ul></td></tr>`;
+            }
+
             if (systemInfo.network && systemInfo.network.adapters && Array.isArray(systemInfo.network.adapters)) {
                 html += `<tr><td style="background:#f4f4f4;font-weight:bold;">Network</td><td><ul style="margin:0;padding-left:15px;">` +
                     systemInfo.network.adapters.map(a => {
@@ -894,12 +1687,38 @@ if (systemInfo.disks && Array.isArray(systemInfo.disks) && systemInfo.disks.leng
                     <tr><td style="font-weight:bold;width:140px;">Full Name:</td><td>${ticketData.fullName}</td></tr>
                     <tr><td style="font-weight:bold;">Email:</td><td>${ticketData.email}</td></tr>
                     <tr><td style="font-weight:bold;">Phone:</td><td>${ticketData.phone}</td></tr>
+                    <tr><td style="font-weight:bold;">Remote Support:</td><td>${remoteSupportRequested ? '<strong style="color:#2ecc71;">Requested</strong>' : '<span style="color:#888;">Not requested</span>'}</td></tr>
                 </table>
                 
                 <div style="background:#f8f9fa;padding:12px;border-radius:6px;margin-bottom:18px;">
                     <h3 style="margin:0 0 10px 0;color:#2c3e50;">Issue Description:</h3>
                     <div style="white-space:pre-line;">${ticketData.description}</div>
                 </div>
+
+                ${remoteSupportRequested ? `
+                <div style="margin-bottom:18px;padding:12px;background:#fff3cd;border-radius:6px;font-size:13px;color:#664d03;border:1px solid #ffecb5;">
+                    <strong>Remote Support:</strong> Customer requested remote support for this ticket.
+                    <div style="margin-top:8px;">
+                        <div><strong>Instructions</strong></div>
+                        <div>1) Technician contacts customer.</div>
+                        <div>2) Customer opens DBS Support Desk and clicks <strong>Launch TeamViewer</strong> when instructed.</div>
+                        <div>3) Remind customer: do not work on confidential information during the session.</div>
+                    </div>
+                    ${(teamViewerId || teamViewerPassword) ? `
+                    <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #d3b05b;">
+                        <div><strong>TeamViewer Details (captured automatically)</strong></div>
+                        ${teamViewerId ? `<div><strong>ID:</strong> <span style="font-family:Consolas,Menlo,monospace;">${teamViewerId}</span></div>` : ''}
+                        ${teamViewerPassword ? `<div><strong>Password:</strong> <span style="font-family:Consolas,Menlo,monospace;">${teamViewerPassword}</span></div>` : ''}
+                        ${teamViewerId && teamViewerPassword ? `<div style="margin-top:6px;color:#28a745;font-size:0.9em;">✓ Both ID and password captured automatically</div>` : ''}
+                    </div>
+                    ` : teamViewerLaunched ? `
+                    <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #d3b05b;">
+                        <div><strong>TeamViewer Status:</strong> TeamViewer was launched successfully.</div>
+                        <div style="margin-top:4px;color:#6c757d;font-size:0.9em;">ID and password not captured - customer will provide verbally</div>
+                    </div>
+                    ` : ''}
+                </div>
+                ` : ''}
                 
                 ${systemInfoTable(ticketData.systemInfo)}
                 
@@ -909,24 +1728,28 @@ if (systemInfo.disks && Array.isArray(systemInfo.disks) && systemInfo.disks.leng
             </div>
         `;
 
-        // Send email using nodemailer (existing logic)
+        // Send email using nodemailer with optimized settings
         const transporter = nodemailer.createTransport({
-          host: 'smtp.dbs-scans.co.za',
+          host: 'smtp.edudesk360.co.za',
           port: 465,
-          secure: true, // Use SSL
+          secure: true, // Use SSL/TLS
           auth: {
-            user: 'inscaperollout@dbs-scans.co.za',
-            pass: 'K619vv4Y39744p'
+            user: 'support@edudesk360.co.za',
+            pass: '7L53cp15990Ql2'
           },
           tls: {
             // Do not fail on invalid certs
             rejectUnauthorized: false
-          }
+          },
+          // Add timeout settings to prevent long delays
+          connectionTimeout: 10000, // 10 seconds to connect
+          greetingTimeout: 5000,     // 5 seconds for greeting
+          socketTimeout: 10000       // 10 seconds for data transfer
         });
 
         const mailOptions = {
-          from: 'inscaperollout@dbs-scans.co.za',
-          to: 'lionelbakerza@gmail.com',
+          from: 'support@edudesk360.co.za',
+          to: 'fns@edudesk360.co.za',
           subject: ticketData.subject || `Support Ticket from ${ticketData.fullName}`,
           text: emailContent,
           html: emailHtml,
@@ -934,13 +1757,57 @@ if (systemInfo.disks && Array.isArray(systemInfo.disks) && systemInfo.disks.leng
         };
 
         console.log('Preparing to send ticket email:', mailOptions);
-        const info = await transporter.sendMail(mailOptions);
+        
+        // Add timeout promise to prevent hanging
+        const emailTimeout = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error('Email sending timeout')), 30000); // 30 second timeout
+        });
+
+        // Race between email sending and timeout
+        const info = await Promise.race([
+          transporter.sendMail(mailOptions),
+          emailTimeout
+        ]);
 
         console.log('Ticket email sent:', info.messageId);
         return { success: true, messageId: info.messageId };
     } catch (error) {
         console.error('Ticket submission error:', error);
-        return { success: false, error: error.message };
+        
+        // If email fails, try to save ticket locally as fallback
+        try {
+            const ticketBackup = {
+                timestamp: new Date().toISOString(),
+                ticketData: ticketData,
+                error: error.message,
+                systemInfo: ticketData.systemInfo
+            };
+            
+            // Save to failed tickets file
+            const failedTicketsPath = path.join(app.getPath('userData'), 'failed-tickets.json');
+            let failedTickets = [];
+            
+            if (fs.existsSync(failedTicketsPath)) {
+                const existingData = fs.readFileSync(failedTicketsPath, 'utf8');
+                failedTickets = JSON.parse(existingData);
+            }
+            
+            failedTickets.push(ticketBackup);
+            fs.writeFileSync(failedTicketsPath, JSON.stringify(failedTickets, null, 2));
+            
+            console.log('Ticket saved locally due to email failure');
+            return { 
+                success: false, 
+                error: `Email failed but ticket saved locally: ${error.message}`,
+                savedLocally: true
+            };
+        } catch (saveError) {
+            console.error('Failed to save ticket locally:', saveError);
+            return { 
+                success: false, 
+                error: `Email failed and local save failed: ${error.message}` 
+            };
+        }
     }
 });
 
@@ -1086,23 +1953,34 @@ function setupTeamViewerHandler() {
  */
 function createWindow() {
   // Get the primary display dimensions
-  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  const primaryArea = screen.getPrimaryDisplay().workArea;
+  const { width: pWidth, height: pHeight } = primaryArea;
   
-  // Adjusted window dimensions to match the second image
-  const windowWidth = 380;  // Slightly wider to accommodate content
-  const windowHeight = 895; // Increased from 860px to 895px (4% increase) for more space
-  const margin = 20;        // Margin from screen edges
+  // Load last window state
+  const state = loadWindowState();
+  const margin = 20;
+
+  // Choose display: last used or primary
+  const displays = screen.getAllDisplays();
+  let targetDisplay = displays.find(d => d.id === state.displayId) || screen.getPrimaryDisplay();
+  const wa = targetDisplay.workArea;
+
+  // Compute size within display constraints
+  const defaultWidth = 380;
+  const defaultHeight = 960;
+  const windowWidth = Math.min(Math.max(state.width || defaultWidth, 320), Math.max(320, wa.width - 2 * margin));
+  const windowHeight = Math.min(Math.max(state.height || defaultHeight, 400), Math.max(400, wa.height - 2 * margin));
 
   // Create the browser window with native title bar
   mainWindow = new BrowserWindow({
     width: windowWidth,
     height: windowHeight,
-    x: width - windowWidth - margin, // Position on right side
-    y: height - windowHeight - margin, // Position near bottom
+    x: Math.max(wa.x + margin, wa.x + wa.width - windowWidth - margin),
+    y: Math.max(wa.y + margin, wa.y + wa.height - windowHeight - margin),
     minWidth: 380,
-    minHeight: 780, // Increased minimum height to maintain proportions
-    show: true, // Changed from false to true to show window on startup
-    title: `DBS Support Desk v${version}`,
+    minHeight: Math.min(780, Math.max(400, wa.height - 2 * margin)),
+    show: !startMinimized, // Changed from false to true to show window on startup
+    title: `FNS Support Desk v${version}`,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -1112,7 +1990,7 @@ function createWindow() {
       contextMenu: true,
       webSecurity: true
     },
-    icon: path.join(__dirname, 'assets', 'DBS_Logo.ico'),
+    icon: path.join(__dirname, 'assets', 'FNS_Logo.ico'),
     frame: true, // Keep native frame
     backgroundColor: '#f5f5f5', // Light gray background to match the form
     skipTaskbar: false, // Show in taskbar
@@ -1123,13 +2001,13 @@ function createWindow() {
   });
 
   // Load the index.html file
-  mainWindow.loadFile('index.html');
+  mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
   // Show the window when it's ready
   mainWindow.once('ready-to-show', () => {
     console.log('Window is ready');
     // Set the version in the title bar
-    mainWindow.setTitle(`DBS Support Desk v${version}`);
+    mainWindow.setTitle(`FNS Support Desk v${version}`);
     
     // Ensure content is properly sized
     mainWindow.webContents.on('did-finish-load', () => {
@@ -1149,6 +2027,20 @@ function createWindow() {
         }
       `);
     });
+
+    const adjustToRightEdge = () => {
+      const currentBounds = mainWindow.getBounds();
+      const display = screen.getDisplayMatching(currentBounds) || screen.getPrimaryDisplay();
+      const wa = display.workArea;
+      const marginPx = 20;
+      const newWidth = Math.min(currentBounds.width, Math.max(320, wa.width - 2 * marginPx));
+      const newHeight = Math.min(Math.max(currentBounds.height, 400), Math.max(400, wa.height - 2 * marginPx));
+      const newY = Math.max(wa.y + marginPx, wa.y + wa.height - newHeight - marginPx);
+      const newX = Math.max(wa.x + marginPx, wa.x + wa.width - newWidth - marginPx);
+      mainWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight });
+    };
+
+    adjustToRightEdge();
   });
 
   // Handle window close event (minimize to tray instead of quitting)
@@ -1238,7 +2130,37 @@ function createWindow() {
   if (process.env.NODE_ENV === 'development') {
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   }
+
+  // Persist window state on move/resize (debounced)
+  let saveTimer = null;
+  const queueSave = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      const b = mainWindow.getBounds();
+      const display = screen.getDisplayMatching(b) || screen.getPrimaryDisplay();
+      saveWindowState({ width: b.width, height: b.height, displayId: display.id });
+    }, 300);
+  };
+  mainWindow.on('resize', queueSave);
+  mainWindow.on('move', queueSave);
 }
+
+app.whenReady().then(() => {
+  screen.on('display-metrics-changed', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const b = mainWindow.getBounds();
+      const display = screen.getDisplayMatching(b) || screen.getPrimaryDisplay();
+      const wa = display.workArea;
+      const margin = 20;
+      const newWidth = Math.min(b.width, Math.max(320, wa.width - 2 * margin));
+      const newHeight = Math.min(b.height, Math.max(400, wa.height - 2 * margin));
+      const newY = Math.max(wa.y + margin, wa.y + wa.height - newHeight - margin);
+      const newX = Math.max(wa.x + margin, wa.x + wa.width - newWidth - margin);
+      mainWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight });
+    }
+  });
+});
 
 // Auto-update functionality
 async function checkAppDirectoryAccess() {
@@ -1281,11 +2203,11 @@ async function checkForUpdates(manualCheck = false) {
     }
 
     // Set the feed URL for GitHub releases
-    const updateServerUrl = 'https://github.com/dbsdeskza/dbs-support-desk';
+    const updateServerUrl = 'https://github.com/fnsdeskza/fns-support-desk';
     autoUpdater.setFeedURL({
       provider: 'github',
-      owner: 'dbsdeskza',
-      repo: 'dbs-support-desk',
+      owner: 'fnsdeskza',
+      repo: 'fns-support-desk',
       private: false
     });
     
@@ -1592,10 +2514,10 @@ function createSystemTray() {
     let iconPath;
     if (app.isPackaged) {
       // In production, use resources path
-      iconPath = path.join(process.resourcesPath, 'assets', 'DBS_Logo.ico');
+      iconPath = path.join(process.resourcesPath, 'assets', 'FNS_Logo.ico');
     } else {
       // In development, use the regular path
-      iconPath = path.join(__dirname, 'assets', 'DBS_Logo.ico');
+      iconPath = path.join(__dirname, 'assets', 'FNS_Logo.ico');
     }
     
     console.log('Using icon path:', iconPath);
@@ -1617,7 +2539,7 @@ function createSystemTray() {
     tray = new Tray(trayIcon);
     
     // Set the tooltip
-    tray.setToolTip(`DBS Support Desk v${app.getVersion()}`);
+    tray.setToolTip(`FNS Support Desk v${app.getVersion()}`);
     
     // Handle click events
     tray.on('click', () => {
@@ -1635,12 +2557,12 @@ function createSystemTray() {
     // Create and set context menu
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: `DBS Support Desk v${app.getVersion()}`,
+        label: `FNS Support Desk v${app.getVersion()}`,
         enabled: false
       },
       { type: 'separator' },
       {
-        label: 'Show DBS Support Desk',
+        label: 'Show FNS Support Desk',
         click: () => {
           if (mainWindow) {
             mainWindow.show();
@@ -1828,8 +2750,8 @@ app.whenReady().then(() => {
   createSystemTray();
   
   // Set up other handlers
-  setupTeamViewerHandler();
   setupAutoUpdater();
+  setupTeamViewerHandler();
   
   // Set up auto-start on Windows
   if (PLATFORM_CONFIG.isWindows) {
@@ -1855,19 +2777,26 @@ async function enableAutoStart() {
   if (!PLATFORM_CONFIG.isWindows) return;
   
   try {
-    const appPath = app.getPath('exe');
-    const appName = 'DBS Support Desk';
-    
-    // Create a batch file to launch the app
-    const batchContent = `@echo off
-start "" "${appPath.replace(/\\/g, '\\\\')}" --minimized`;
-    
-    const batchPath = path.join(app.getPath('userData'), 'dbs_support_desk_startup.bat');
-    fs.writeFileSync(batchPath, batchContent, 'utf8');
-    
-    // Add to Windows startup
-    const regKey = `REG ADD "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /t REG_SZ /d "${batchPath.replace(/\\/g, '\\\\')}" /f`;
-    require('child_process').execSync(regKey);
+    // Clean up legacy startup entry and batch file from previous versions
+    try {
+      const runKeyPath = 'HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run';
+      // Use cmd to redirect output to nul and avoid console error noise if the value is missing
+      require('child_process').execSync(`cmd /c REG DELETE "${runKeyPath}" /v "DBS Support Desk" /f >nul 2>&1`, { stdio: 'ignore' });
+    } catch (e) {
+      // Ignore if key/value does not exist
+    }
+
+    try {
+      const legacyBatchPath = path.join(app.getPath('userData'), 'dbs_support_desk_startup.bat');
+      if (fs.existsSync(legacyBatchPath)) {
+        fs.unlinkSync(legacyBatchPath);
+      }
+    } catch (e) {
+      // Ignore file cleanup errors
+    }
+
+    // Configure native auto-start
+    app.setLoginItemSettings({ openAtLogin: true, args: ['--minimized'] });
     
     console.log('Auto-start configured successfully');
     return true;

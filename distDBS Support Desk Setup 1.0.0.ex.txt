@@ -1,3 +1,0 @@
-dist\DBS Support Desk Setup 1.0.0.exe - A full installer that allows you to choose installation directory
-dist\DBS_Support_Desk_Portable.exe - A portable executable you can run directly
-You can now upload either of these files to your website for distribution. The installer will guide users through the installation process, while the portable version can be run directly without installation.

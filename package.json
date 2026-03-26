@@ -1,65 +1,160 @@
 {
-  "name": "dbs-support-desk",
-  "version": "1.0.2",
-  "description": "DBS Support Desk Widget",
+  "name": "fns-support-desk",
+  "version": "1.0.31",
+  "description": "FNS Support Desk Widget",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder",
-    "build:installer": "electron-builder --windows nsis",
-    "build:portable": "electron-builder --windows portable",
-    "publish": "electron-builder -p always"
+    "dist": "electron-builder -p always",
+    "build:win": "electron-builder --windows",
+    "build:win:nsis": "electron-builder --windows nsis",
+    "build:win:portable": "electron-builder --windows portable",
+    "build:mac": "electron-builder --mac",
+    "build:all": "electron-builder -mwl",
+    "publish": "electron-builder -p always",
+    "build:dbs": "node build-brand.js dbs && npm run build:win",
+    "build:fns": "node build-brand.js fns && npm run build:win",
+    "start:dbs": "node build-brand.js dbs && npm start",
+    "start:fns": "node build-brand.js fns && npm start",
+    "deploy:dbs": "powershell -ExecutionPolicy Bypass -File deploy.ps1 -Brand dbs",
+    "deploy:fns": "powershell -ExecutionPolicy Bypass -File deploy.ps1 -Brand fns",
+    "deploy:both": "powershell -ExecutionPolicy Bypass -File deploy.ps1 -Brand both"
   },
   "build": {
-    "appId": "com.dbs.supportdesk",
-    "productName": "DBS Support Desk",
+    "appId": "com.fns.supportdesk",
+    "productName": "FNS Support Desk",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "assets"
     },
+    "extraResources": [
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "tools/dbs-utilities",
+        "to": "tools/dbs-utilities",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "afterSign": "scripts/notarize.js",
+    "files": [
+      "**/*",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}",
+      "!**/node_modules/.bin",
+      "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}",
+      "!.editorconfig",
+      "!**/._*",
+      "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}",
+      "!**/{__pycache__,thumbs.db,.flowconfig,.idea,.vs,.nyc_output}",
+      "!**/{appveyor.yml,.travis.yml,circle.yml,.vscode}"
+    ],
     "win": {
-      "icon": "assets/DBS_Logo.png",
       "target": [
         "nsis",
         "portable"
+      ],
+      "icon": "assets/FNS_Logo.ico",
+      "extraFiles": [
+        {
+          "from": "node_modules/electron/dist/vcruntime140_1.dll",
+          "to": ".",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
+      "asarUnpack": [
+        "**/*.node",
+        "**/node_modules/v8-compile-cache/**",
+        "tools/dbs-utilities/**/*"
+      ]
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/mac/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "assets/mac/entitlements.mac.plist",
+      "entitlementsInherit": "assets/mac/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "This app requires microphone access for potential voice communication during support sessions.",
+        "NSCameraUsageDescription": "This app requires camera access for potential video communication during support sessions.",
+        "NSDocumentsFolderUsageDescription": "This app needs access to your documents for attaching files to support tickets."
+      },
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "sign": false,
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "installerIcon": "assets/FNS_Logo.ico",
+      "uninstallerIcon": "assets/FNS_Logo.ico",
+      "perMachine": false,
+      "allowElevation": false,
+      "runAfterFinish": false
     },
     "publish": [
       {
         "provider": "github",
         "owner": "dbsdeskza",
         "repo": "dbs-support-desk",
-        "private": false
+        "private": false,
+        "releaseType": "release"
       }
-    ]
+    ],
+    "generateUpdatesFilesForAllChannels": true
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-github-username/dbs-support-desk.git"
+    "url": "https://github.com/fnsdeskza/fns-support-desk.git"
   },
   "keywords": [
     "support",
     "widget",
-    "dbs"
+    "fns"
   ],
   "author": "DBS Technology",
   "license": "ISC",
-  "dependencies": {
-    "dotenv": "^16.4.5",
-    "electron-dl": "^3.5.0",
-    "electron-log": "^5.1.0",
-    "electron-updater": "^6.1.7",
-    "nodemailer": "^6.9.13",
-    "systeminformation": "^5.22.7"
-  },
   "devDependencies": {
-    "electron": "^29.1.4",
-    "electron-builder": "^26.0.12"
+    "electron": "^28.0.0",
+    "electron-builder": "^24.6.3",
+    "electron-notarize": "^1.2.2",
+    "v8-compile-cache": "^2.4.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.3",
+    "electron-dl": "^3.0.0",
+    "electron-log": "^5.0.0",
+    "electron-updater": "^6.1.1",
+    "nodemailer": "^6.9.1",
+    "systeminformation": "^5.11.22"
   }
 }

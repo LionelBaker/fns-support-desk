@@ -1,0 +1,44 @@
+{
+  "dbs": {
+    "name": "dbs-support-desk",
+    "productName": "DBS Support Desk",
+    "description": "DBS Support Desk Widget",
+    "appId": "com.dbs.supportdesk",
+    "author": "DBS Technology",
+    "email": {
+      "from": "support@edudesk360.co.za",
+      "to": "support@dbstech.co.za"
+    },
+    "urls": {
+      "contact": "https://dbstechnology.co.za/contact-us/",
+      "about": "https://dbstechnology.co.za/about-dbs-technology/"
+    },
+    "github": {
+      "owner": "dbsdeskza",
+      "repo": "dbs-support-desk"
+    },
+    "icon": "DBS_Logo.ico",
+    "toolsDir": "dbs-utilities"
+  },
+  "fns": {
+    "name": "fns-support-desk",
+    "productName": "FNS Support Desk",
+    "description": "FNS Support Desk Widget",
+    "appId": "com.fns.supportdesk",
+    "author": "DBS Technology",
+    "email": {
+      "from": "support@edudesk360.co.za",
+      "to": "fns@edudesk360.co.za"
+    },
+    "urls": {
+      "contact": "https://dbstechnology.co.za/contact-us/",
+      "about": "https://dbstechnology.co.za/about-dbs-technology/"
+    },
+    "github": {
+      "owner": "fnsdeskza",
+      "repo": "fns-support-desk"
+    },
+    "icon": "FNS_Logo.ico",
+    "toolsDir": "dbs-utilities"
+  }
+}
