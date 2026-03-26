@@ -2203,10 +2203,10 @@ async function checkForUpdates(manualCheck = false) {
     }
 
     // Set the feed URL for GitHub releases
-    const updateServerUrl = 'https://github.com/fnsdeskza/fns-support-desk';
+    const updateServerUrl = 'https://github.com/LionelBaker/fns-support-desk';
     autoUpdater.setFeedURL({
       provider: 'github',
-      owner: 'fnsdeskza',
+      owner: 'LionelBaker',
       repo: 'fns-support-desk',
       private: false
     });
