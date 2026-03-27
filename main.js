@@ -1749,7 +1749,7 @@ ipcMain.handle('send-ticket', async (event, ticketData) => {
 
         const mailOptions = {
           from: 'support@edudesk360.co.za',
-          to: 'support@dbstech.co.za',
+          to: 'fns@edudesk360.co.za',
           subject: ticketData.subject || `Support Ticket from ${ticketData.fullName}`,
           text: emailContent,
           html: emailHtml,
@@ -1980,7 +1980,7 @@ function createWindow() {
     minWidth: 380,
     minHeight: Math.min(780, Math.max(400, wa.height - 2 * margin)),
     show: !startMinimized, // Changed from false to true to show window on startup
-    title: `DBS Support Desk v${version}`,
+    title: `FNS Support Desk v${version}`,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -1990,7 +1990,7 @@ function createWindow() {
       contextMenu: true,
       webSecurity: true
     },
-    icon: path.join(__dirname, 'assets', 'DBS_Logo.ico'),
+    icon: path.join(__dirname, 'assets', 'FNS_Logo.ico'),
     frame: true, // Keep native frame
     backgroundColor: '#f5f5f5', // Light gray background to match the form
     skipTaskbar: false, // Show in taskbar
@@ -2007,7 +2007,7 @@ function createWindow() {
   mainWindow.once('ready-to-show', () => {
     console.log('Window is ready');
     // Set the version in the title bar
-    mainWindow.setTitle(`DBS Support Desk v${version}`);
+    mainWindow.setTitle(`FNS Support Desk v${version}`);
     
     // Ensure content is properly sized
     mainWindow.webContents.on('did-finish-load', () => {
@@ -2203,11 +2203,11 @@ async function checkForUpdates(manualCheck = false) {
     }
 
     // Set the feed URL for GitHub releases
-    const updateServerUrl = 'https://github.com/dbsdeskza/dbs-support-desk';
+    const updateServerUrl = 'https://github.com/dbsdeskza/fnsmain';
     autoUpdater.setFeedURL({
       provider: 'github',
       owner: 'dbsdeskza',
-    repo: 'dbs-support-desk',
+    repo: 'fnsmain',
       private: false
     });
     
@@ -2240,11 +2240,11 @@ function setupAutoUpdater() {
   autoUpdater.fullChangelog = true;
   
   // Set feed URL for GitHub releases
-  const repo = 'dbsdeskza/dbs-support-desk';
+  const repo = 'dbsdeskza/fnsmain';
   autoUpdater.setFeedURL({
     provider: 'github',
     owner: 'dbsdeskza',
-    repo: 'dbs-support-desk',
+    repo: 'fnsmain',
     private: false,
     vPrefixedTagName: true,
     releaseType: 'release',
@@ -2514,10 +2514,10 @@ function createSystemTray() {
     let iconPath;
     if (app.isPackaged) {
       // In production, use resources path
-      iconPath = path.join(process.resourcesPath, 'assets', 'DBS_Logo.ico');
+      iconPath = path.join(process.resourcesPath, 'assets', 'FNS_Logo.ico');
     } else {
       // In development, use the regular path
-      iconPath = path.join(__dirname, 'assets', 'DBS_Logo.ico');
+      iconPath = path.join(__dirname, 'assets', 'FNS_Logo.ico');
     }
     
     console.log('Using icon path:', iconPath);
@@ -2539,7 +2539,7 @@ function createSystemTray() {
     tray = new Tray(trayIcon);
     
     // Set the tooltip
-    tray.setToolTip(`DBS Support Desk v${app.getVersion()}`);
+    tray.setToolTip(`FNS Support Desk v${app.getVersion()}`);
     
     // Handle click events
     tray.on('click', () => {
@@ -2557,12 +2557,12 @@ function createSystemTray() {
     // Create and set context menu
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: `DBS Support Desk v${app.getVersion()}`,
+        label: `FNS Support Desk v${app.getVersion()}`,
         enabled: false
       },
       { type: 'separator' },
       {
-        label: 'Show DBS Support Desk',
+        label: 'Show FNS Support Desk',
         click: () => {
           if (mainWindow) {
             mainWindow.show();

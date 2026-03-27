@@ -1,7 +1,7 @@
 {
-  "name": "dbs-support-desk",
+  "name": "fns-support-desk",
   "version": "1.0.37",
-  "description": "DBS Support Desk Widget",
+  "description": "FNS Support Desk Widget",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -25,8 +25,8 @@
     "safe-deploy:both": "node safe-deploy.js both"
   },
   "build": {
-    "appId": "com.dbs.supportdesk",
-    "productName": "DBS Support Desk",
+    "appId": "com.fns.supportdesk",
+    "productName": "FNS Support Desk",
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -64,7 +64,7 @@
         "nsis",
         "portable"
       ],
-      "icon": "assets/DBS_Logo.ico",
+      "icon": "assets/FNS_Logo.ico",
       "extraFiles": [
         {
           "from": "node_modules/electron/dist/vcruntime140_1.dll",
@@ -118,8 +118,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "installerIcon": "assets/DBS_Logo.ico",
-      "uninstallerIcon": "assets/DBS_Logo.ico",
+      "installerIcon": "assets/FNS_Logo.ico",
+      "uninstallerIcon": "assets/FNS_Logo.ico",
       "perMachine": false,
       "allowElevation": false,
       "runAfterFinish": false
@@ -137,12 +137,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/dbsdeskza/dbs-support-desk.git"
+    "url": "https://github.com/dbsdeskza/fnsmain.git"
   },
   "keywords": [
     "support",
     "widget",
-    "dbs"
+    "fns"
   ],
   "author": "DBS Technology",
   "license": "ISC",
