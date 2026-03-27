@@ -34,6 +34,7 @@ if (packageJson.publish && packageJson.publish[0]) {
   packageJson.publish[0].repo = config.github.repo;
 }
 
+// Update repository URL
 packageJson.repository.url = `https://github.com/${config.github.owner}/${config.github.repo}.git`;
 packageJson.keywords[2] = brand;
 
@@ -75,10 +76,17 @@ mainJsContent = mainJsContent.replace(/iconPath = path\.join\(__dirname, 'assets
 // Update tools directory
 mainJsContent = mainJsContent.replace(/tools\/[^-utilities-]*-utilities/g, `tools/${config.toolsDir}`);
 
-// Update GitHub URLs
+// Update GitHub URLs - Update BOTH configurations
 mainJsContent = mainJsContent.replace(/const updateServerUrl = 'https:\/\/github\.com\/[^']*'/, `const updateServerUrl = 'https://github.com/${config.github.owner}/${config.github.repo}'`);
 mainJsContent = mainJsContent.replace(/owner: '[^']*',/, `owner: '${config.github.owner}',`);
 mainJsContent = mainJsContent.replace(/repo: '[^']*',/, `repo: '${config.github.repo}',`);
+
+// Update the second update configuration in setupAutoUpdater function
+mainJsContent = mainJsContent.replace(/const repo = '[^']*\/[^']*';[\s\S]*?autoUpdater\.setFeedURL\(\{[^}]*owner: '[^']*',[\s\S]*?repo: '[^']*'/, (match) => {
+    return match.replace(/const repo = '[^']*\/[^']*';/, `const repo = '${config.github.owner}/${config.github.repo}';`)
+            .replace(/owner: '[^']*'/, `owner: '${config.github.owner}'`)
+            .replace(/repo: '[^']*'/, `repo: '${config.github.repo}'`);
+});
 
 // Write updated main.js
 fs.writeFileSync(mainJsPath, mainJsContent);

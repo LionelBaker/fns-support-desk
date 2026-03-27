@@ -1,7 +1,7 @@
 {
-  "name": "fns-support-desk",
-  "version": "1.0.31",
-  "description": "FNS Support Desk Widget",
+  "name": "dbs-support-desk",
+  "version": "1.0.37",
+  "description": "DBS Support Desk Widget",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -13,17 +13,20 @@
     "build:mac": "electron-builder --mac",
     "build:all": "electron-builder -mwl",
     "publish": "electron-builder -p always",
-    "build:dbs": "node build-brand.js dbs && npm run build:win",
-    "build:fns": "node build-brand.js fns && npm run build:win",
+    "build:dbs": "node build-brand.js dbs && npm run build:win && node verify-config.js dbs",
+    "build:fns": "node build-brand.js fns && npm run build:win && node verify-config.js fns",
     "start:dbs": "node build-brand.js dbs && npm start",
     "start:fns": "node build-brand.js fns && npm start",
     "deploy:dbs": "powershell -ExecutionPolicy Bypass -File deploy.ps1 -Brand dbs",
     "deploy:fns": "powershell -ExecutionPolicy Bypass -File deploy.ps1 -Brand fns",
-    "deploy:both": "powershell -ExecutionPolicy Bypass -File deploy.ps1 -Brand both"
+    "deploy:both": "powershell -ExecutionPolicy Bypass -File deploy.ps1 -Brand both",
+    "safe-deploy:dbs": "node safe-deploy.js dbs",
+    "safe-deploy:fns": "node safe-deploy.js fns",
+    "safe-deploy:both": "node safe-deploy.js both"
   },
   "build": {
-    "appId": "com.fns.supportdesk",
-    "productName": "FNS Support Desk",
+    "appId": "com.dbs.supportdesk",
+    "productName": "DBS Support Desk",
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -61,7 +64,7 @@
         "nsis",
         "portable"
       ],
-      "icon": "assets/FNS_Logo.ico",
+      "icon": "assets/DBS_Logo.ico",
       "extraFiles": [
         {
           "from": "node_modules/electron/dist/vcruntime140_1.dll",
@@ -115,8 +118,8 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "installerIcon": "assets/FNS_Logo.ico",
-      "uninstallerIcon": "assets/FNS_Logo.ico",
+      "installerIcon": "assets/DBS_Logo.ico",
+      "uninstallerIcon": "assets/DBS_Logo.ico",
       "perMachine": false,
       "allowElevation": false,
       "runAfterFinish": false
@@ -125,7 +128,7 @@
       {
         "provider": "github",
         "owner": "dbsdeskza",
-        "repo": "dbs-support-desk",
+        "repo": "fnsmain",
         "private": false,
         "releaseType": "release"
       }
@@ -134,12 +137,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/LionelBaker/fns-support-desk.git"
+    "url": "https://github.com/dbsdeskza/dbs-support-desk.git"
   },
   "keywords": [
     "support",
     "widget",
-    "fns"
+    "dbs"
   ],
   "author": "DBS Technology",
   "license": "ISC",
